@@ -1,0 +1,56 @@
+---
+- name: Restore production core from S3
+  hosts: "{{ restore_target | default('deadline_repo') }}"
+  become: true
+  vars:
+    dr_bucket: ""
+    backup_id: "latest"
+    workdir: /tmp/dr-restore
+
+  tasks:
+    - name: Resolve latest backup id
+      when: backup_id == "latest"
+      ansible.builtin.shell: >
+        aws s3 ls s3://{{ dr_bucket }}/core/ | awk '{print $2}' | sort | tail -1 | tr -d '/'
+      register: latest
+      changed_when: false
+
+    - name: Set chosen backup
+      ansible.builtin.set_fact:
+        chosen: "{{ latest.stdout | default(backup_id, true) if backup_id == 'latest' else backup_id }}"
+
+    - name: Fetch backup set
+      ansible.builtin.shell: |
+        rm -rf {{ workdir }} && mkdir -p {{ workdir }}
+        aws s3 cp s3://{{ dr_bucket }}/core/{{ chosen }}/ {{ workdir }}/ --recursive --only-show-errors
+      changed_when: true
+
+    - name: Verify checksums (abort on mismatch)
+      ansible.builtin.shell: cd {{ workdir }} && sha256sum -c manifest.sha256
+      changed_when: false
+
+    - name: Stop Deadline RCS while restoring
+      ansible.builtin.systemd: { name: deadline10launcher, state: stopped }
+      ignore_errors: true
+
+    - name: Restore MongoDB 
+      ansible.builtin.shell: >
+        docker run --rm --network host -v {{ workdir }}:/dump mongo:6
+        mongorestore --uri "mongodb://localhost:27017" --gzip
+        --archive=/dump/deadline-mongo.archive.gz --drop
+
+    - name: Restore config trees
+      ansible.builtin.unarchive:
+        src: "{{ workdir }}/configs.tar.gz"
+        dest: /
+        remote_src: true
+
+    - name: Start Deadline RCS
+      ansible.builtin.systemd: { name: deadline10launcher, state: started }
+
+    - name: Validate — Mongo answers and has job data
+      ansible.builtin.shell: >
+        docker run --rm --network host mongo:6
+        mongosh --quiet --eval 'db.getSiblingDB("deadline10db_Jobs").getCollectionNames().length'
+      register: validate
+      failed_when: validate.stdout | int < 1

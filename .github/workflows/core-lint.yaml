@@ -1,0 +1,18 @@
+# .github/workflows/core-lint.yml
+name: core-lint
+on:
+  pull_request:
+    paths: ["dr/**", "ansible/**"]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck dr/*.sh
+      - name: ansible-lint
+        run: |
+          pip install ansible-lint
+          ansible-lint ansible/
