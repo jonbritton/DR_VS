@@ -1,0 +1,12 @@
+# /etc/systemd/system/core-backup-gw.service
+[Unit]
+Description=Production-core backup (via S3 File Gateway)
+Wants=network-online.target
+After=network-online.target remote-fs.target
+# Do not run if the gateway share is not mounted.
+RequiresMountsFor=/mnt/dr-gw
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/core-backup-gw.env
+ExecStart=/usr/local/bin/core-backup-gw.sh
