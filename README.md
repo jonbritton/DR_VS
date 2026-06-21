@@ -3,11 +3,9 @@
 ### A disaster recovery strategy in 3 acts.
 directed by Jon Britton
 
-Automated, encrypted, off-site backup of a VFX studio's **production core** — the small set
-of stateful things that kill a facility when lost — paired with an **automated, drillable
-restore**. The thesis: *an untested backup is only a hypothesis.* This repo ships the backup,
-the restore, the monitoring that proves the backup keeps happening, and the practice of
-rehearsing the restore on a schedule with a measured RTO.
+Automated, encrypted, off-site backup of the Viz Studio's **production core**, paired with an automated, drillable
+restore.  This repo&runbook ships the backup,the restore, the monitoring that proves the backup keeps happening, and 
+the practice of rehearsing the restore on a schedule with a measured RTO.
 
 The worked example targets a [Thinkbox Deadline](https://www.awsthinkbox.com/deadline) render
 farm (MongoDB repository + config trees), but the patterns are domain-agnostic: a stateful
@@ -95,10 +93,9 @@ docs/pri/DR-Production-core.md   # full design doc + rationale
 **AWS-side:**
 
 - An IAM identity for the **backup** host carrying the write-only policy from
-  `terraform/modules/dr-bup/vars.tf` (`s3:PutObject` + `s3:ListBucket`, no delete/overwrite).
+  `terraform/modules/dr-bup/vars.tf` 
 - A separate **restore** identity with `s3:GetObject` + `s3:ListBucket` — read and write are
-  deliberately different credentials. (Production-grade path: IAM Roles Anywhere for short-lived
-  credentials with no static keys on disk; the simple path is a scoped IAM user access key.)
+  deliberately different credentials. 
 
 ---
 
@@ -148,7 +145,7 @@ success/failure is visible via `systemctl status core-backup.service` and the jo
 | `BUCKET` | *(required)* | Destination S3 bucket |
 | `MONGO_URI` | `mongodb://localhost:27017` | Deadline repository DB |
 | `CONFIG_PATHS` | `/opt/Thinkbox/DeadlineRepository10/settings /etc/pipeline` | Space-separated config trees to tar |
-| `METRICS_FILE` | `/var/lib/node_exporter/textfile/drbackup.prom` | Where the Prometheus metric is written |
+| `METRICS_FILE` | `/var/lib/node_exporter/textfile/corebackup.prom` | Where the Prometheus metric is written |
 
 Steps per run: (1) `mongodump --gzip --archive` via the `mongo:6` container → (2) `tar -czf`
 the config paths (tolerating missing paths) → (3) `sha256sum` manifest → (4) `aws s3 cp` the
@@ -189,8 +186,8 @@ restores."*
 
 The text-file metric is scraped by node_exporter; `prometheus/rules/dr.yml` carries two alerts:
 
-- **`DRBackupStale`** (critical) — no successful backup in >26h.
-- **`DRBackupShrunk`** (warning) — latest backup <50% of its 7-day average size, catching the
+- **`CoreBackupStale`** (critical) — no successful backup in >26h.
+- **`CoreBackupShrunk`** (warning) — latest backup <50% of its 7-day average size, catching the
   "succeeded but produced nothing" failure that staleness alerts miss.
 
 ---
@@ -201,21 +198,13 @@ The text-file metric is scraped by node_exporter; `prometheus/rules/dr.yml` carr
   queue state is too much to lose (the design doesn't change).
 - **RTO 60 min** — restore is automated, not a manual runbook. The drill log proves the number.
 
-## Cost
-
-Order of magnitude cheaper than the rest of a DR program: roughly **$1–3/month** of S3 for
-config-scale nightly backups (~1–2 GB) with 180-day retention; Deep Archive ~$1/TB-month for
-the >90-day tier; ~$0.10 per quarterly drill VM. IAM, lifecycle, and alerts are free.
-
----
 
 ## Variant: S3 File Gateway → Glacier Deep Archive
 
 A second egress path lives alongside the direct-to-S3 one. Instead of `aws s3 cp`, the backup
 host writes its files to an NFS share exported by an **AWS S3 File Gateway**; the gateway
 uploads them to the same DR bucket and the existing lifecycle tiers older snapshots into
-**Glacier Deep Archive**. Use it when you want a POSIX file mount on the backup host rather
-than an SDK/CLI upload.
+**Glacier Deep Archive**. Use it when you want a POSIX file mount on the backup host instead of a SDK/CLI upload.
 
 - Files: `dr/core-backup-gw.{sh,service,timer}`, `ansible/core-backup-gw.yml`,
   `ansible/core-restore-gw.yml`, `terraform/modules/storage-gateway/`.
@@ -227,14 +216,6 @@ than an SDK/CLI upload.
 - Full write-up: [`docs/pri/DR-Storage-Gateway.md`](docs/pri/DR-Storage-Gateway.md).
 
 ---
-
-## Known caveat
-
-The backup script emits metrics named `drbackup_last_success_timestamp_seconds` and
-`drbackup_last_size_bytes` (`dr/core-backup.sh`), but the alert rules in
-`prometheus/rules/dr.yml` query `corebackup_last_success_timestamp_seconds` /
-`corebackup_last_size_bytes`. The names must match for the alerts to evaluate — align them
-(in one file or the other) before relying on the monitoring.
 
 ## Cleanup
 

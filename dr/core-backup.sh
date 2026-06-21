@@ -7,10 +7,10 @@ set -euo pipefail
 BUCKET="${BUCKET:?set BUCKET}"                       # S3 Bucket  e.g. render-farm-dev-dr-058264204697
 MONGO_URI="${MONGO_URI:-mongodb://localhost:27017}"  # Deadline Repository DB
 CONFIG_PATHS="${CONFIG_PATHS:-/opt/Thinkbox/DeadlineRepository10/settings /etc/pipeline}"  
-WORK="$(mktemp -d /tmp/drbackup.XXXXXX)"
+WORK="$(mktemp -d /tmp/corebackup.XXXXXX)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREFIX="core/${STAMP}"
-METRICS_FILE="${METRICS_FILE:-/var/lib/node_exporter/textfile/drbackup.prom}"
+METRICS_FILE="${METRICS_FILE:-/var/lib/node_exporter/textfile/corebackup.prom}"
 
 trap 'rm -rf "$WORK"' EXIT
 
@@ -39,12 +39,12 @@ aws s3 cp "$WORK/" "s3://${BUCKET}/${PREFIX}/" --recursive --only-show-errors
 #=---- 5. Emit Prometheus metrics (node_exporter textfile collector)
 SIZE_BYTES=$(du -sb "$WORK" | cut -f1)
 cat > "$METRICS_FILE" <<EOF
-# HELP drbackup_last_success_timestamp_seconds Unix time of last successful core backup.
-# TYPE drbackup_last_success_timestamp_seconds gauge
-drbackup_last_success_timestamp_seconds $(date +%s)
-# HELP drbackup_last_size_bytes Size of last core backup payload.
-# TYPE drbackup_last_size_bytes gauge
-drbackup_last_size_bytes ${SIZE_BYTES}
+# HELP corebackup_last_success_timestamp_seconds Unix time of last successful core backup.
+# TYPE corebackup_last_success_timestamp_seconds gauge
+corebackup_last_success_timestamp_seconds $(date +%s)
+# HELP corebackup_last_size_bytes Size of last core backup payload.
+# TYPE corebackup_last_size_bytes gauge
+corebackup_last_size_bytes ${SIZE_BYTES}
 EOF
 
 echo "OK: ${PREFIX} (${SIZE_BYTES} bytes)"

@@ -10,8 +10,6 @@ resource "aws_s3_bucket" "dr" {
   tags   = merge(var.tags, { Name = "${var.name_prefix}-dr" })
 }
 
-# Versioning is the ransomware/oops protection: overwrites and deletes
-# create new versions instead of destroying history.
 resource "aws_s3_bucket_versioning" "dr" {
   bucket = aws_s3_bucket.dr.id
   versioning_configuration { status = "Enabled" }
