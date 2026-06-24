@@ -1,0 +1,10 @@
+# /etc/systemd/system/core-backup.service
+[Unit]
+Description=Production-core backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/core-backup.env
+ExecStart=/usr/local/bin/core-backup.sh
