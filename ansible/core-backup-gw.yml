@@ -6,7 +6,7 @@
     gw_nfs_export: ""          # from the storage-gateway mod output, e.g. 10.0.0.20:/render-farm-dev-dr-############
     gw_mount: /mnt/dr-gw
     file_share_arn: ""         # from the storage-gateway mod output
-    mongo_uri: "mongodb://localhost:27017"
+    mongo_uri: "mongodb://deadline:27017"
 
   tasks:
     - name: Install NFS client

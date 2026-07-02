@@ -83,7 +83,7 @@
     - name: Restore MongoDB
       ansible.builtin.shell: >
         docker run --rm --network host -v {{ workdir }}:/dump mongo:6
-        mongorestore --uri "mongodb://localhost:27017" --gzip
+        mongorestore --uri "mongodb://deadline:27017" --gzip
         --archive=/dump/deadline-mongo.archive.gz --drop
 
     - name: Restore config trees
