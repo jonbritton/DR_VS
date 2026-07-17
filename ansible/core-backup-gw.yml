@@ -1,0 +1,98 @@
+---
+- name: Deploy production-core backup via S3 File Gateway
+  hosts: deadline_repo
+  become: true
+  vars:
+    gw_nfs_export: ""          # from the storage-gateway mod output, e.g. 10.0.0.20:/render-farm-dev-dr-############
+    gw_mount: /mnt/dr-gw
+    file_share_arn: ""         # from the storage-gateway mod output
+    mongo_uri: "mongodb://localhost:27017"
+    # Identity for the backup host. Unlike the direct-to-S3 variant this is NOT
+    # the S3 writer policy: the gateway does the uploading, and the host only
+    # calls storagegateway:NotifyWhenUploaded. Vault-encrypt; leave both empty
+    # to rely on credentials already configured on the host.
+    aws_access_key_id: ""
+    aws_secret_access_key: ""
+    aws_region: "us-west-2"
+
+  tasks:
+    - name: Preflight — validate required settings
+      ansible.builtin.assert:
+        that:
+          - gw_nfs_export | length > 0
+          - file_share_arn | length > 0
+          - (aws_access_key_id | length > 0) == (aws_secret_access_key | length > 0)
+        fail_msg: >-
+          Set gw_nfs_export and file_share_arn (storage-gateway module outputs),
+          and provide aws_access_key_id/aws_secret_access_key together or not
+          at all.
+
+    - name: Install NFS client
+      ansible.builtin.package:
+        name: nfs-common
+        state: present
+
+    - name: Create mount point
+      ansible.builtin.file:
+        path: "{{ gw_mount }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount the File Gateway share
+      ansible.posix.mount:
+        path: "{{ gw_mount }}"
+        src: "{{ gw_nfs_export }}"
+        fstype: nfs
+        # hard mount, no client-side lock, survive reboots
+        opts: "nofail,_netdev,hard,noresvport,nolock,timeo=600,retrans=2"
+        state: mounted
+
+    - name: Install backup script
+      ansible.builtin.copy:
+        src: ../dr/core-backup-gw.sh
+        dest: /usr/local/bin/core-backup-gw.sh
+        mode: "0750"
+
+    - name: Configure environment
+      ansible.builtin.copy:
+        dest: /etc/core-backup-gw.env
+        mode: "0600"
+        content: |
+          GW_MOUNT={{ gw_mount }}
+          FILE_SHARE_ARN={{ file_share_arn }}
+          MONGO_URI={{ mongo_uri }}
+          {% if aws_access_key_id | length > 0 %}
+          AWS_ACCESS_KEY_ID={{ aws_access_key_id }}
+          AWS_SECRET_ACCESS_KEY={{ aws_secret_access_key }}
+          AWS_DEFAULT_REGION={{ aws_region }}
+          {% endif %}
+
+    - name: Install systemd units
+      ansible.builtin.copy:
+        src: "../dr/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop: [core-backup-gw.service, core-backup-gw.timer]
+      notify: Reload systemd
+
+    # Run the handler NOW if the units changed, so the timer enable and the
+    # smoke test below act on the new definitions, not the previously loaded
+    # ones (handlers otherwise fire only at the end of the play).
+    - name: Apply pending systemd reload
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable timer
+      ansible.builtin.systemd:
+        name: core-backup-gw.timer
+        enabled: true
+        state: started
+
+    - name: Run one backup now (smoke test)
+      ansible.builtin.systemd:
+        name: core-backup-gw.service
+        state: started
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

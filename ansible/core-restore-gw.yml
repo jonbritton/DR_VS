@@ -1,0 +1,132 @@
+---
+# Restore the production core through the S3 File Gateway share.
+#
+# Once lifecycle has tiered a snapshot into Glacier Deep Archive, the gateway cannot read it
+# until the objects are restored back to a readable class.
+# This playbook detects that, issues the S3 restore, waits, refreshes the gateway cache, and
+# only then reads from the share. For a freshly-written (still-Standard) snapshot the archive
+# branch is skipped and the restore is as fast as the direct variant.
+- name: Restore production core via S3 File Gateway
+  hosts: "{{ restore_target | default('deadline_repo') }}"
+  become: true
+  vars:
+    dr_bucket: ""
+    gw_mount: /mnt/dr-gw
+    file_share_arn: ""
+    backup_id: "latest"        # or e.g. 20260605T023000Z
+    workdir: /var/tmp/dr-restore   # real disk — /tmp is often tmpfs, too small for a multi-GB dump
+    restore_days: 3            # how long the thawed copy stays readable
+    glacier_tier: "Standard"   # Deep Archive: Standard ~12h, Bulk ~48h
+    # Parametrized so the same play works on a drill host, where the production
+    # hostname does not resolve. Override if the repo's Mongo is remote.
+    mongo_uri: "mongodb://localhost:27017"
+    # Read-only restore identity (<name_prefix>-dr-restore-reader policy from
+    # terraform/modules/dr-bup; covers s3:GetObject/ListBucket and the
+    # s3:RestoreObject thaw). The refresh-cache task additionally needs
+    # storagegateway:RefreshCache on the share. Vault-encrypt; leave both empty
+    # to rely on credentials already configured on the host.
+    aws_access_key_id: ""
+    aws_secret_access_key: ""
+    aws_region: "us-west-2"
+    restore_env:
+      AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+      AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+      AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+  # Injected per-task, never written to disk on the target. Empty when no creds
+  # were passed, so the host's own credential chain still applies.
+  environment: "{{ restore_env if aws_access_key_id | length > 0 else {} }}"
+
+  tasks:
+    - name: Preflight — validate required settings
+      ansible.builtin.assert:
+        that:
+          - dr_bucket | length > 0
+          - file_share_arn | length > 0
+          - (aws_access_key_id | length > 0) == (aws_secret_access_key | length > 0)
+        fail_msg: >-
+          Set dr_bucket and file_share_arn, and provide
+          aws_access_key_id/aws_secret_access_key together or not at all.
+
+    - name: Resolve latest backup id
+      when: backup_id == "latest"
+      ansible.builtin.shell: >
+        aws s3 ls s3://{{ dr_bucket }}/core/ | awk '{print $2}' | sort | tail -1 | tr -d '/'
+      register: latest
+      changed_when: false
+
+    - name: Set chosen backup
+      ansible.builtin.set_fact:
+        chosen: "{{ latest.stdout | default(backup_id, true) if backup_id == 'latest' else backup_id }}"
+
+    - name: Check storage class of the snapshot
+      ansible.builtin.shell: >
+        aws s3api head-object --bucket {{ dr_bucket }}
+        --key core/{{ chosen }}/deadline-mongo.archive.gz
+        --query 'StorageClass' --output text
+      register: storage_class
+      changed_when: false
+
+    - name: Request Glacier restore for archived snapshots
+      when: storage_class.stdout in ['DEEP_ARCHIVE', 'GLACIER']
+      ansible.builtin.shell: |
+        for k in deadline-mongo.archive.gz configs.tar.gz manifest.sha256; do
+          aws s3api restore-object --bucket {{ dr_bucket }} \
+            --key core/{{ chosen }}/$k \
+            --restore-request 'Days={{ restore_days }},GlacierJobParameters={Tier={{ glacier_tier }}}' || true
+        done
+      changed_when: true
+
+    - name: Wait for the thaw to finish (Deep Archive can take hours)
+      when: storage_class.stdout in ['DEEP_ARCHIVE', 'GLACIER']
+      ansible.builtin.shell: >
+        aws s3api head-object --bucket {{ dr_bucket }}
+        --key core/{{ chosen }}/deadline-mongo.archive.gz
+        --query 'Restore' --output text
+      register: restore_state
+      until: restore_state.stdout is search('ongoing-request=\"false\"')
+      retries: 144              # 144 * 5m = 12h
+      delay: 300
+      changed_when: false
+
+    - name: Refresh the gateway cache so it sees the (restored) objects
+      ansible.builtin.shell: >
+        aws storagegateway refresh-cache --file-share-arn {{ file_share_arn }}
+        --folder-list /core/{{ chosen }} --recursive
+      changed_when: true
+
+    - name: Fetch backup set from the gateway share
+      ansible.builtin.shell: |
+        rm -rf {{ workdir }} && mkdir -p {{ workdir }}
+        cp -a {{ gw_mount }}/core/{{ chosen }}/. {{ workdir }}/
+      changed_when: true
+
+    - name: Verify checksums (abort on mismatch)
+      ansible.builtin.shell: cd {{ workdir }} && sha256sum -c manifest.sha256
+      changed_when: false
+
+    - name: Stop Deadline RCS while restoring
+      ansible.builtin.systemd: { name: deadline10launcher, state: stopped }
+      ignore_errors: true
+
+    - name: Restore MongoDB
+      ansible.builtin.shell: >
+        docker run --rm --network host -v {{ workdir }}:/dump mongo:6
+        mongorestore --uri "{{ mongo_uri }}" --gzip
+        --archive=/dump/deadline-mongo.archive.gz --drop
+
+    - name: Restore config trees
+      ansible.builtin.unarchive:
+        src: "{{ workdir }}/configs.tar.gz"
+        dest: /
+        remote_src: true
+
+    - name: Start Deadline RCS
+      ansible.builtin.systemd: { name: deadline10launcher, state: started }
+
+    - name: Validate — Mongo answers and has job data
+      ansible.builtin.shell: >
+        docker run --rm --network host mongo:6
+        mongosh --quiet "{{ mongo_uri }}" --eval 'db.getSiblingDB("deadline10db_Jobs").getCollectionNames().length'
+      register: validate
+      failed_when: validate.stdout | int < 1

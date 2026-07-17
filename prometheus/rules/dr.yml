@@ -1,0 +1,18 @@
+groups:
+  - name: core-backup
+    rules:
+      - alert: CoreBackupStale
+        expr: time() - corebackup_last_success_timestamp_seconds > 26 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "Core backup is stale (>26h)"
+          description: "Last successful backup was {{ $value | humanizeDuration }} ago."
+
+      - alert: CoreBackupShrunk
+        expr: corebackup_last_size_bytes < 0.5 * avg_over_time(corebackup_last_size_bytes[7d])
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "Core backup is <50% of its 7-day average size"
+          description: "A successful-but-tiny backup usually means a source path got hosed."
